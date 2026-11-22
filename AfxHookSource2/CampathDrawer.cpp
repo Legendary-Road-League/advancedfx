@@ -2,6 +2,7 @@
 
 #include "CampathDrawer.h"
 #include "MirvTime.h"
+#include "MirvAr.h"
 
 #include "hlaeFolder.h"
 
@@ -495,6 +496,8 @@ bool CCampathDrawer::Draw_get(void)
 
 void CCampathDrawer::EndDevice()
 {
+	g_MirvAr.ReleaseDeviceObjects();
+
 	if(0 == m_Device)
 		return;
 
@@ -774,7 +777,7 @@ void CCampathDrawer::OnEngineThread_SetupViewDone() {
 	// Actually we are often called twice per frame , once after 3d skybox
 	// and once after world is drawn, maybe we will be even called more times.
 
-	if(!m_Draw)
+	if(!m_Draw && !g_MirvAr.HasVisible())
 		return;
 
 	if(nullptr == m_LessDynamicProperties) {
@@ -942,8 +945,34 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 	}
 	m_DeviceContext->VSSetConstantBuffers(0,1,&m_ConstantBuffer);
 
+	// SHUD AR: logos in the world, depth tested, no depth write.
+	if(m_Dsv2 && !g_MirvAr.Render(m_Device, m_DeviceContext)) {
+		bool arStateSet = false;
+		g_MirvAr.ForEachVisible(m_Device, [&](ID3D11ShaderResourceView * srv, const float c[4][3]) {
+			if(!arStateSet) {
+				arStateSet = true;
+				m_DeviceContext->IASetInputLayout(m_InputLayoutDigits);
+				m_DeviceContext->OMSetDepthStencilState(m_DepthStencilStateLines, 0);
+				m_DeviceContext->RSSetState(m_RasterizerStateDigits);
+				m_DeviceContext->VSSetShader(m_DrawTextureVertexShader, NULL, 0);
+				m_DeviceContext->PSSetShader(m_DrawTextureShader, NULL, 0);
+			}
+			m_DeviceContext->PSSetShaderResources(0,1,&srv);
+			AutoSingleQuad(
+				Vector3(c[0][0], c[0][1], c[0][2]), 0, 0,
+				Vector3(c[1][0], c[1][1], c[1][2]), 0, 1,
+				Vector3(c[2][0], c[2][1], c[2][2]), 1, 0,
+				Vector3(c[3][0], c[3][1], c[3][2]), 1, 1
+			);
+			AutoSingleQuadFlush();
+		});
+	}
+	// SHUD AR changed these - back to the campath drawer's
+	m_DeviceContext->PSSetSamplers(0,1,&m_SamplerState);
+	m_DeviceContext->OMSetBlendState(m_BlendState,NULL, 0xffffffff);
+
 	// Draw:
-	{
+	if(m_Draw) {
 		//Vector3 vvForward, vvUp, vvRight, vvPos;
 
 		double curTime = dynamicPorperties->GetCurTime();
@@ -1295,6 +1324,13 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 			TRUE // RestoreContextState has quite some performance impact on TRUE, let's try FALSE first
 		);
 		pCommandList->Release();
+	}
+
+	// SHUD AR: "mirv_ar pick" - surface under the screen centre from this frame's depth.
+	{
+		double m[4][4];
+		for(int r = 0; r < 4; ++r) for(int c = 0; c < 4; ++c) m[r][c] = worldToScreenMatrix.m[r][c];
+		g_MirvAr.OnFrameDone(m_Device, m_ImmediateContext, m_Dsv2, m_pViewPort, m);
 	}
 }
 

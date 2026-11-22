@@ -272,7 +272,8 @@ private:
 	};
 	ID3D11Buffer * m_ConstantBufferWidth = nullptr;
 
-	bool m_Draw = false;
+	// The engine thread toggles path display while the render thread also draws map logos.
+	std::atomic<bool> m_Draw{false};
 	DWORD m_OldCurrentColor;
 	Vector3 m_OldPreviousPolyLinePoint;
 	ID3D11PixelShader * m_PixelShader = nullptr;

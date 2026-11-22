@@ -101,6 +101,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${AFX_OPENEXR_LINK_LIBRARIES}
     afx_hook_source2
 	dxguid.lib
+	windowscodecs.lib
+	ole32.lib
     bcrypt.lib # corrosion fails to detect this
     $<$<CONFIG:Debug>:msvcrtd.lib> # corrision messes this up in latest rust version
 )
@@ -249,6 +251,9 @@ target_sources(${PROJECT_NAME} PRIVATE
 	ViewModel.h
 
     main.cpp
+
+	MirvAr.cpp
+	MirvAr.h
 
 	MirvColors.cpp
 	MirvColors.h
