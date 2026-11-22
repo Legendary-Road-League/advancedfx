@@ -12,6 +12,9 @@ extern advancedfx::CCommandLine* g_CommandLine;
 #include <Windows.h>
 #include <wincodec.h>
 #include <d3dcompiler.h>
+#include <SpoutDX.h>
+#include <fstream>
+#include <set>
 
 #include <algorithm>
 #include <cmath>
@@ -28,6 +31,63 @@ static const unsigned int c_MaxTextureSize = 2048;
 
 template<class T> static void SafeRelease(T*& p) { if (p) { p->Release(); p = nullptr; } }
 
+// One receiver per visible sender, updated once on the render thread before recording draws.
+class CMirvArFeed {
+public:
+    CMirvArFeed(ID3D11Device* device, const std::string& sender) {
+        m_Receiver.OpenDirectX11(device);
+        m_Receiver.SetReceiverName(sender.c_str());
+    }
+    ~CMirvArFeed() { SafeRelease(view); }
+    void Update(ID3D11Device* device) {
+        if (GetTickCount64() < m_RetryAt) return;
+        ID3D11Texture2D* frame = m_Receiver.ReceiveTexture() ? m_Receiver.GetSenderTexture() : nullptr;
+        if (!frame) m_RetryAt = GetTickCount64() + 500;
+        if (frame == m_Frame && view) return;
+        SafeRelease(view);
+        m_Frame = frame;
+        if (!frame) return;
+        D3D11_TEXTURE2D_DESC desc;
+        frame->GetDesc(&desc);
+        width = desc.Width; height = desc.Height;
+        device->CreateShaderResourceView(frame, nullptr, &view);
+    }
+    ID3D11ShaderResourceView* view = nullptr;
+    unsigned int width = 0, height = 0;
+private:
+    spoutDX m_Receiver;
+    ID3D11Texture2D* m_Frame = nullptr; // Owned by the SDK, retained by view.
+    ULONGLONG m_RetryAt = 0;
+};
+
+// Drop unused receivers and refresh a shared GPU texture only once for all its placements.
+void CMirvAr::RefreshFeeds(ID3D11Device* device) {
+    std::set<std::string> active;
+    if (m_Enabled) for (const auto& entry : m_Items) {
+        const auto& item = entry.second;
+        if (item.visible && !item.sender.empty()) active.insert(item.sender);
+    }
+    for (auto it = m_Feeds.begin(); it != m_Feeds.end();) {
+        if (!active.count(it->first)) it = m_Feeds.erase(it);
+        else ++it;
+    }
+    for (const auto& sender : active) {
+        auto& feed = m_Feeds[sender];
+        if (!feed) feed = std::make_shared<CMirvArFeed>(device, sender);
+        feed->Update(device);
+    }
+}
+
+// Supply the static mip chain or the current shared frame, preserving its aspect ratio.
+ID3D11ShaderResourceView* CMirvAr::TextureFor(ID3D11Device* device, const std::string& id, Item& item) {
+    if (item.sender.empty()) return EnsureTexture(device, id, item) ? item.srv : nullptr;
+    const auto it = m_Feeds.find(item.sender);
+    if (it == m_Feeds.end() || !it->second->view) return nullptr;
+    item.w = it->second->width;
+    item.h = it->second->height;
+    return it->second->view;
+}
+
 // Use the same parsed launch flag as the HLAE observer runtime.
 bool CMirvAr::IsInsecure() {
 	// Never do anything in a VAC secured session.
@@ -37,9 +97,9 @@ bool CMirvAr::IsInsecure() {
 // Schedule a render pass only for a pending measurement or a visible image.
 bool CMirvAr::HasVisible() {
 	std::unique_lock<std::mutex> lock(m_Mutex);
-	if (m_PickPending) return true;
+	if (m_PickPending || !m_Feeds.empty()) return true;
 	if (!m_Enabled) return false;
-	for (auto& it : m_Items) if (it.second.visible && !it.second.mips.empty()) return true;
+	for (auto& it : m_Items) if (it.second.visible && (!it.second.mips.empty() || !it.second.sender.empty())) return true;
 	return false;
 }
 
@@ -69,6 +129,7 @@ void CMirvAr::ReleaseOwnDeviceObjects() {
 // Serialize graphics-device teardown with changes made by console commands.
 void CMirvAr::ReleaseDeviceObjects() {
 	std::unique_lock<std::mutex> lock(m_Mutex);
+    m_Feeds.clear();
 	for (auto& it : m_Items) ReleaseItemDevice(it.second);
 	ReleaseOwnDeviceObjects();
 }
@@ -335,9 +396,11 @@ void CMirvAr::Corners(const Item& item, float corners[4][3]) {
 // Render the visible logos into the observation frame without writing scene depth.
 bool CMirvAr::Render(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 	std::unique_lock<std::mutex> lock(m_Mutex);
-	if (!m_Enabled || nullptr == device || nullptr == ctx) return true;
+	if (nullptr == device || nullptr == ctx) return true;
+    RefreshFeeds(device);
+	if (!m_Enabled) return true;
 	bool any = false;
-	for (auto& it : m_Items) if (it.second.visible && !it.second.mips.empty()) { any = true; break; }
+	for (auto& it : m_Items) if (it.second.visible) { any = true; break; }
 	if (!any) return true;
 	if (!EnsureDeviceObjects(device)) return false;
 
@@ -354,8 +417,9 @@ bool CMirvAr::Render(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 
 	for (auto& it : m_Items) {
 		Item& item = it.second;
-		if (!item.visible || item.mips.empty()) continue;
-		if (!EnsureTexture(device, it.first, item)) continue;
+		if (!item.visible) continue;
+        auto* view = TextureFor(device, it.first, item);
+        if (!view) continue;
 		if (item.opacity <= 0.004f) continue;
 
 		float c[4][3];
@@ -374,7 +438,7 @@ bool CMirvAr::Render(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 		}
 		int b = item.blend < 0 || item.blend > 3 ? 0 : item.blend;
 		ctx->OMSetBlendState(m_Blend[b], nullptr, 0xffffffff);
-		ctx->PSSetShaderResources(0, 1, &item.srv);
+		ctx->PSSetShaderResources(0, 1, &view);
 		ctx->Draw(4, 0);
 	}
 	ID3D11ShaderResourceView* nullSrv = nullptr;
@@ -388,11 +452,12 @@ void CMirvAr::ForEachVisible(ID3D11Device* device, const std::function<void(ID3D
 	if (!m_Enabled || nullptr == device) return;
 	for (auto& it : m_Items) {
 		Item& item = it.second;
-		if (!item.visible || item.mips.empty()) continue;
-		if (!EnsureTexture(device, it.first, item)) continue;
+		if (!item.visible) continue;
+        auto* view = TextureFor(device, it.first, item);
+        if (!view) continue;
 		float corners[4][3];
 		Corners(item, corners);
-		fn(item.srv, corners);
+		fn(view, corners);
 	}
 }
 
@@ -712,6 +777,19 @@ static void BuildMips(unsigned int w, unsigned int h, std::vector<unsigned char>
 bool CMirvAr::LoadImageFile(const std::string& utf8Path, Item& item, std::string& outError) {
 	std::wstring wPath;
 	if (!UTF8StringToWideString(utf8Path.c_str(), wPath)) { outError = "bad path encoding"; return false; }
+    // The descriptor contains only a local sender name. Network URLs stay in the Manager.
+    if (wPath.size() >= 6 && wPath.compare(wPath.size() - 6, 6, L".spout") == 0) {
+        std::ifstream input(wPath.c_str(), std::ios::binary);
+        char name[256];
+        input.read(name, sizeof(name));
+        const auto size = input.gcount();
+        if (!input.eof() || size <= 0 || size >= sizeof(name)
+            || memchr(name, 0, size) || memchr(name, '\n', size) || memchr(name, '\r', size)) {
+            outError = "cannot read Spout sender"; return false;
+        }
+        item.sender.assign(name, static_cast<size_t>(size));
+        return true;
+    }
 
 	HRESULT hrInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 	bool needUninit = SUCCEEDED(hrInit);
@@ -786,7 +864,7 @@ void CMirvAr::Console(int argc, const char* const* argv) {
 			{
 				std::unique_lock<std::mutex> lock(m_Mutex);
 				auto it = m_Items.find(id);
-				if (it != m_Items.end() && it->second.file == file && !it->second.mips.empty()) {
+				if (it != m_Items.end() && it->second.file == file) {
 					// same image - only move / resize, keep texture and style
 					Item& cur = it->second;
 					memcpy(cur.pos, next.pos, sizeof(cur.pos));
@@ -838,9 +916,20 @@ void CMirvAr::Console(int argc, const char* const* argv) {
 		}
 		// Advertise the supported protocol and correlate each asynchronous pick by ID.
 		if (0 == _stricmp(cmd, "protocol")) {
+            advancedfx::Message("LRL_MAP_ADS_LIVE 1\n");
 			advancedfx::Message("LRL_MAP_ADS_READY 1\n");
 			return;
 		}
+        if (0 == _stricmp(cmd, "livestatus")) {
+            std::lock_guard<std::mutex> lock(m_Mutex);
+            for (const auto& entry : m_Items) {
+                if (entry.second.sender.empty() || !entry.second.visible) continue;
+                const auto it = m_Feeds.find(entry.second.sender);
+                advancedfx::Message("LRL_MAP_ADS_FEED %s %d\n", entry.first.c_str(),
+                    it != m_Feeds.end() && it->second->view ? 1 : 0);
+            }
+            return;
+        }
 		if (argc >= 3 && (0 == _stricmp(cmd, "pick") || 0 == _stricmp(cmd, "result"))) {
 			const std::string id(argv[2]);
 			if (id.size() != 32 || id.find_first_not_of("0123456789abcdef") != std::string::npos) return;

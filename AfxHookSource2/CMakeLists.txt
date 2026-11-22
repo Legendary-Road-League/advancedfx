@@ -2,6 +2,25 @@ cmake_minimum_required (VERSION 3.24)
 
 project ("AfxHookSource2")
 
+# Build the DirectX-only Spout SDK for both the receiver and the network-video sender.
+FetchContent_Declare(map_spout
+    URL https://codeload.github.com/leadedge/Spout2/zip/refs/tags/2.007.015
+    URL_HASH SHA256=fb2b9be38ab8d422c21e4ba8b1bdd5f28257d14f6fcf82a977011ac1d9f83e18
+    SOURCE_SUBDIR unused)
+FetchContent_MakeAvailable(map_spout)
+set(spout_sdk "${map_spout_SOURCE_DIR}/SPOUTSDK")
+set(spout_dx "${spout_sdk}/SpoutDirectX/SpoutDX")
+add_library(MapSpout STATIC "${spout_dx}/SpoutDX.cpp")
+foreach(module SpoutCopy SpoutDirectX SpoutFrameCount SpoutSenderNames SpoutSharedMemory SpoutUtils)
+    target_sources(MapSpout PRIVATE "${spout_sdk}/SpoutGL/${module}.cpp")
+endforeach()
+target_include_directories(MapSpout PUBLIC "${spout_dx}" "${spout_sdk}/SpoutGL")
+target_link_libraries(MapSpout PUBLIC d3d11 dxgi winmm version)
+add_executable(AfxMapMedia AfxMapMedia.cpp)
+target_link_libraries(AfxMapMedia PRIVATE MapSpout)
+add_custom_command(TARGET AfxMapMedia POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${map_spout_SOURCE_DIR}/LICENSE" "$<TARGET_FILE_DIR:AfxMapMedia>/Spout-LICENSE.txt")
+
 ################################################################################
 
 set(AFXHOOKSOURCE2_SHADERS
@@ -98,6 +117,7 @@ target_link_directories(${PROJECT_NAME} PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
+    MapSpout
     ${AFX_OPENEXR_LINK_LIBRARIES}
     afx_hook_source2
 	dxguid.lib

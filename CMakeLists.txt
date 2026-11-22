@@ -142,7 +142,7 @@ elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
     add_subdirectory("misc/mirv-script/src/snippets")
 
     add_custom_target(advancedfx ALL
-	    DEPENDS AfxHookSource AfxHookSource2
+	    DEPENDS AfxHookSource AfxHookSource2 AfxMapMedia
     )
 endif()
 
@@ -228,9 +228,13 @@ elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
     install(
         PROGRAMS
             "$<TARGET_FILE:AfxHookSource2>"
+            "$<TARGET_FILE:AfxMapMedia>"
         DESTINATION "bin/x64"
         COMPONENT x64-source2
     )
+    # Include the license for the statically linked Spout SDK in the distribution.
+    install(FILES "$<TARGET_FILE_DIR:AfxMapMedia>/Spout-LICENSE.txt"
+        DESTINATION "bin/x64" COMPONENT x64-source2)
 
     install(
         FILES

@@ -13,10 +13,12 @@
 #include <d3d11.h>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
+class CMirvArFeed;
 class CMirvAr {
 public:
 	// Engine thread: is there anything to do this frame (draw or pick)?
@@ -43,6 +45,7 @@ public:
 private:
 	struct Item {
 		std::string file;
+        std::string sender; // Named Spout sender for live placements.
 		float pos[3] = {0, 0, 0};
 		float ang[3] = {0, 0, 0}; // pitch yaw roll (degrees), the logo faces the forward vector
 		float width = 64;
@@ -62,6 +65,10 @@ private:
 
 	std::mutex m_Mutex;
 	std::map<std::string, Item> m_Items;
+    // Render-thread receivers are shared by every visible placement of a sender.
+    std::map<std::string, std::shared_ptr<CMirvArFeed>> m_Feeds;
+    void RefreshFeeds(ID3D11Device* device);
+    ID3D11ShaderResourceView* TextureFor(ID3D11Device* device, const std::string& id, Item& item);
 	bool m_Enabled = true;
 	std::string m_PickId, m_PickResult;
 	bool m_PickPending = false, m_PickRay = false;
