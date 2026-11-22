@@ -30,7 +30,7 @@ public:
 	bool Render(ID3D11Device* device, ID3D11DeviceContext* ctx);
 
 	// Old path (shared drawtexture shaders) if Render() returned false.
-	void ForEachVisible(ID3D11Device* device, const std::function<void(ID3D11ShaderResourceView* srv, const float corners[4][3])>& fn);
+	void ForEachVisible(ID3D11Device* device, const std::function<void(ID3D11ShaderResourceView* srv, const float corners[4][3], float inset)>& fn);
 
 	// Render thread, after the frame's command list was executed: handles a
 	// pending "pick". worldToScreen is the matrix used for this frame (row major,
@@ -50,6 +50,10 @@ private:
 		float ang[3] = {0, 0, 0}; // pitch yaw roll (degrees), the logo faces the forward vector
 		float width = 64;
 		bool visible = true;
+		// Standby holds the live source ready. Cue progress runs between zero and one.
+		bool standby = false, waitingFrame = false;
+		float cueFrom = 0;
+		ULONGLONG cueTime = 0;
 		float opacity = 1.0f;
 		float brightness = 1.0f;
 		int blend = 0; // 0 normal, 1 multiply, 2 screen, 3 add
@@ -92,7 +96,9 @@ private:
 	bool EnsureDeviceObjects(ID3D11Device* device);
 	void ReleaseOwnDeviceObjects();
 	bool EnsureTexture(ID3D11Device* device, const std::string& id, Item& item);
-	void Corners(const Item& item, float corners[4][3]);
+	static float CuePosition(const Item& item, ULONGLONG now);
+	static float Reveal(Item& item);
+	void Corners(const Item& item, float corners[4][3], float reveal);
 	bool ReadDepth(ID3D11Device* device, ID3D11DeviceContext* immediate, ID3D11DepthStencilView* dsv, const int px[3][2], float outDepth[3], std::string& error);
 
 	static bool LoadImageFile(const std::string& utf8Path, Item& item, std::string& outError);

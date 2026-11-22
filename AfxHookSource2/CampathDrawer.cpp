@@ -948,7 +948,7 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 	// SHUD AR: logos in the world, depth tested, no depth write.
 	if(m_Dsv2 && !g_MirvAr.Render(m_Device, m_DeviceContext)) {
 		bool arStateSet = false;
-		g_MirvAr.ForEachVisible(m_Device, [&](ID3D11ShaderResourceView * srv, const float c[4][3]) {
+		g_MirvAr.ForEachVisible(m_Device, [&](ID3D11ShaderResourceView * srv, const float c[4][3], float inset) {
 			if(!arStateSet) {
 				arStateSet = true;
 				m_DeviceContext->IASetInputLayout(m_InputLayoutDigits);
@@ -959,10 +959,10 @@ void CCampathDrawer::OnPostRenderAllTools_DrawingThread(CDynamicProperties * dyn
 			}
 			m_DeviceContext->PSSetShaderResources(0,1,&srv);
 			AutoSingleQuad(
-				Vector3(c[0][0], c[0][1], c[0][2]), 0, 0,
-				Vector3(c[1][0], c[1][1], c[1][2]), 0, 1,
-				Vector3(c[2][0], c[2][1], c[2][2]), 1, 0,
-				Vector3(c[3][0], c[3][1], c[3][2]), 1, 1
+				Vector3(c[0][0], c[0][1], c[0][2]), inset, 0,
+				Vector3(c[1][0], c[1][1], c[1][2]), inset, 1,
+				Vector3(c[2][0], c[2][1], c[2][2]), 1-inset, 0,
+				Vector3(c[3][0], c[3][1], c[3][2]), 1-inset, 1
 			);
 			AutoSingleQuadFlush();
 		});

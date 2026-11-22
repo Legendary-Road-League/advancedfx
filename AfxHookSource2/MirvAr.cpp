@@ -65,7 +65,7 @@ void CMirvAr::RefreshFeeds(ID3D11Device* device) {
     std::set<std::string> active;
     if (m_Enabled) for (const auto& entry : m_Items) {
         const auto& item = entry.second;
-        if (item.visible && !item.sender.empty()) active.insert(item.sender);
+        if ((item.visible || item.standby) && !item.sender.empty()) active.insert(item.sender);
     }
     for (auto it = m_Feeds.begin(); it != m_Feeds.end();) {
         if (!active.count(it->first)) it = m_Feeds.erase(it);
@@ -99,7 +99,10 @@ bool CMirvAr::HasVisible() {
 	std::unique_lock<std::mutex> lock(m_Mutex);
 	if (m_PickPending || !m_Feeds.empty()) return true;
 	if (!m_Enabled) return false;
-	for (auto& it : m_Items) if (it.second.visible && (!it.second.mips.empty() || !it.second.sender.empty())) return true;
+	for (const auto& it : m_Items) {
+		const auto& item = it.second;
+		if (item.visible || (item.standby && (!item.sender.empty() || CuePosition(item, GetTickCount64()) > 0))) return true;
+	}
 	return false;
 }
 
@@ -378,12 +381,31 @@ static void AngleVectors(const float ang[3], float f[3], float r[3], float u[3])
 	u[0] = (float)(cr * sp * cy + sr * sy); u[1] = (float)(cr * sp * sy - sr * cy); u[2] = (float)(cr * cp);
 }
 
-// Derive the four world-space corners from physical width and image aspect ratio.
-void CMirvAr::Corners(const Item& item, float corners[4][3]) {
+// Linear travel reverses immediately at the current position, including during a close.
+float CMirvAr::CuePosition(const Item& item, ULONGLONG now) {
+	if (!item.standby) return item.visible ? 1.f : 0.f;
+	if (item.waitingFrame) return item.cueFrom;
+	const float distance = static_cast<float>(now - item.cueTime) / 600.f;
+	return item.visible ? (std::min)(1.f, item.cueFrom + distance) : (std::max)(0.f, item.cueFrom - distance);
+}
+
+// Start on the first drawable frame, so a late video signal still gets its full entrance.
+float CMirvAr::Reveal(Item& item) {
+	const auto now = GetTickCount64();
+	if (item.waitingFrame) {
+		item.waitingFrame = false;
+		item.cueTime = now;
+	}
+	const float t = CuePosition(item, now);
+	return t * t * (3.f - 2.f * t);
+}
+
+// Crop both geometry and UVs about the centre without squeezing the picture.
+void CMirvAr::Corners(const Item& item, float corners[4][3], float reveal) {
 	float f[3], r[3], u[3];
 	AngleVectors(item.ang, f, r, u);
 	// The logo faces f, so for a viewer looking at it its right is -r.
-	float hw = item.width * 0.5f;
+	float hw = item.width * 0.5f * reveal;
 	float hh = item.width * 0.5f * (float)item.h / (float)(item.w ? item.w : 1);
 	for (int k = 0; k < 3; ++k) {
 		corners[0][k] = item.pos[k] + r[k] * hw + u[k] * hh; // top-left
@@ -400,7 +422,7 @@ bool CMirvAr::Render(ID3D11Device* device, ID3D11DeviceContext* ctx) {
     RefreshFeeds(device);
 	if (!m_Enabled) return true;
 	bool any = false;
-	for (auto& it : m_Items) if (it.second.visible) { any = true; break; }
+	for (const auto& it : m_Items) if (it.second.visible || CuePosition(it.second, GetTickCount64()) > 0) { any = true; break; }
 	if (!any) return true;
 	if (!EnsureDeviceObjects(device)) return false;
 
@@ -417,17 +439,20 @@ bool CMirvAr::Render(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 
 	for (auto& it : m_Items) {
 		Item& item = it.second;
-		if (!item.visible) continue;
+		if (!item.visible && CuePosition(item, GetTickCount64()) <= 0) continue;
         auto* view = TextureFor(device, it.first, item);
         if (!view) continue;
 		if (item.opacity <= 0.004f) continue;
 
 		float c[4][3];
-		Corners(item, c);
+		const float reveal = Reveal(item);
+		if (reveal <= 0) continue;
+		Corners(item, c, reveal);
 		D3D11_MAPPED_SUBRESOURCE m;
 		if (FAILED(ctx->Map(m_Vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) continue;
 		ArVertex* v = (ArVertex*)m.pData;
-		const float uv[4][2] = { {0, 0}, {0, 1}, {1, 0}, {1, 1} };
+		const float inset = (1.f - reveal) * 0.5f;
+		const float uv[4][2] = { {inset, 0}, {inset, 1}, {1.f-inset, 0}, {1.f-inset, 1} };
 		for (int i = 0; i < 4; ++i) { v[i].x = c[i][0]; v[i].y = c[i][1]; v[i].z = c[i][2]; v[i].u = uv[i][0]; v[i].v = uv[i][1]; }
 		ctx->Unmap(m_Vb, 0);
 
@@ -447,17 +472,19 @@ bool CMirvAr::Render(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 }
 
 // Provide textures and corners to the existing quad renderer if own shaders fail.
-void CMirvAr::ForEachVisible(ID3D11Device* device, const std::function<void(ID3D11ShaderResourceView* srv, const float corners[4][3])>& fn) {
+void CMirvAr::ForEachVisible(ID3D11Device* device, const std::function<void(ID3D11ShaderResourceView* srv, const float corners[4][3], float inset)>& fn) {
 	std::unique_lock<std::mutex> lock(m_Mutex);
 	if (!m_Enabled || nullptr == device) return;
 	for (auto& it : m_Items) {
 		Item& item = it.second;
-		if (!item.visible) continue;
+		if (!item.visible && CuePosition(item, GetTickCount64()) <= 0) continue;
         auto* view = TextureFor(device, it.first, item);
         if (!view) continue;
 		float corners[4][3];
-		Corners(item, corners);
-		fn(view, corners);
+		const float reveal = Reveal(item);
+		if (reveal <= 0) continue;
+		Corners(item, corners, reveal);
+		fn(view, corners, (1.f - reveal) * 0.5f);
 	}
 }
 
@@ -870,7 +897,7 @@ void CMirvAr::Console(int argc, const char* const* argv) {
 					memcpy(cur.pos, next.pos, sizeof(cur.pos));
 					memcpy(cur.ang, next.ang, sizeof(cur.ang));
 					cur.width = next.width;
-					cur.visible = next.visible;
+					if (!cur.standby) cur.visible = next.visible;
 					needLoad = false;
 				}
 			}
@@ -916,6 +943,7 @@ void CMirvAr::Console(int argc, const char* const* argv) {
 		}
 		// Advertise the supported protocol and correlate each asynchronous pick by ID.
 		if (0 == _stricmp(cmd, "protocol")) {
+            advancedfx::Message("LRL_MAP_ADS_CUE_READY 1\n");
             advancedfx::Message("LRL_MAP_ADS_LIVE 1\n");
 			advancedfx::Message("LRL_MAP_ADS_READY 1\n");
 			return;
@@ -923,7 +951,7 @@ void CMirvAr::Console(int argc, const char* const* argv) {
         if (0 == _stricmp(cmd, "livestatus")) {
             std::lock_guard<std::mutex> lock(m_Mutex);
             for (const auto& entry : m_Items) {
-                if (entry.second.sender.empty() || !entry.second.visible) continue;
+                if (entry.second.sender.empty() || (!entry.second.visible && !entry.second.standby)) continue;
                 const auto it = m_Feeds.find(entry.second.sender);
                 advancedfx::Message("LRL_MAP_ADS_FEED %s %d\n", entry.first.c_str(),
                     it != m_Feeds.end() && it->second->view ? 1 : 0);
@@ -943,6 +971,42 @@ void CMirvAr::Console(int argc, const char* const* argv) {
 				m_PickResult.clear();
 				m_PickPending = true;
 			}
+			return;
+		}
+		// A standby screen starts closed. Restyling an armed screen preserves its on-air state.
+		if (0 == _stricmp(cmd, "standby") && argc == 4) {
+			std::lock_guard<std::mutex> lock(m_Mutex);
+			auto it = m_Items.find(argv[2]);
+			if (it == m_Items.end()) { advancedfx::Warning("%s: no item \"%s\".\n", arg0, argv[2]); return; }
+			auto& item = it->second;
+			const bool armed = atoi(argv[3]) != 0;
+			if (item.standby != armed) {
+				item.standby = armed;
+				item.visible = false;
+				item.waitingFrame = false;
+				item.cueFrom = 0;
+			}
+			return;
+		}
+		// The same command works from CS2 binds and the Manager. Report the target to the panel.
+		if (0 == _stricmp(cmd, "cue") && argc == 4) {
+			std::lock_guard<std::mutex> lock(m_Mutex);
+			auto it = m_Items.find(argv[2]);
+			if (it == m_Items.end() || !it->second.standby) { advancedfx::Warning("%s: screen not on standby.\n", arg0); return; }
+			auto& item = it->second;
+			bool open;
+			if (0 == _stricmp(argv[3], "open")) open = true;
+			else if (0 == _stricmp(argv[3], "close")) open = false;
+			else if (0 == _stricmp(argv[3], "toggle")) open = !item.visible;
+			else return;
+			if (open != item.visible) {
+				const auto now = GetTickCount64();
+				item.cueFrom = CuePosition(item, now);
+				item.cueTime = now;
+				item.visible = open;
+				item.waitingFrame = open && item.cueFrom == 0;
+			}
+			advancedfx::Message("LRL_MAP_ADS_CUE %s %d\n", argv[2], open ? 1 : 0);
 			return;
 		}
 		if (0 == _stricmp(cmd, "visible") && 4 <= argc) {
@@ -1000,6 +1064,8 @@ void CMirvAr::Console(int argc, const char* const* argv) {
 		"%s style <id> <opacity 0..1> <blend 0 normal|1 multiply|2 screen|3 add> <brightness 0..2>\n"
 		"%s pick <32-hex-id> [ray] - Sample the view centre. Read the JSON reply with mirv_ar result <id>.\n"
 		"%s visible <id> 0|1\n"
+		"mirv_ar standby <id> 1|0 - Arm or disarm a screen.\n"
+		"mirv_ar cue <id> open|close|toggle - Animate an armed screen.\n"
 		"%s remove <id>\n"
 		"%s clear\n"
 		"%s enabled [0|1]\n"
