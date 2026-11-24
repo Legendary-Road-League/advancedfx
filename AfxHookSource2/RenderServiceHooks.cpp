@@ -61,14 +61,14 @@ void __fastcall My_Engine2_RenderService_OnClientOutput(void * pUnk0, void * pUn
     // We need to do the a normal / main render pass first, since it's used to generate the UI background texture
     // and it won't be re-generated in subsequent passes.
 
-    RenderSystemDX11_EngineThread_BeginMainRenderPass();
+    const NadeCam::Frame camera = NadeCam::CurrentFrame();
+    const bool hasInset = camera.view == NadeCam::View::Pip;
+    RenderSystemDX11_EngineThread_BeginMainRenderPass(hasInset);
 
-    RenderSystemDX11_EngineThread_BeforeRender();
+    RenderSystemDX11_EngineThread_BeforeRender(NadeCam::Pass::Observer, hasInset ? camera.shot : 0);
 
     g_Engine2_RenderService_OnClientOutput(pUnk0,pUnk1);
     g_bHad_ClientOutput = true;
-
-    bool bFirstExtraPass = true;
 
     while(RenderSystemDX11_EngineThread_HasNextRenderPass()) {
 
@@ -80,10 +80,23 @@ void __fastcall My_Engine2_RenderService_OnClientOutput(void * pUnk0, void * pUn
 
         RenderSystemDX11_EngineThread_BeginNextRenderPass();
 
-        RenderSystemDX11_EngineThread_BeforeRender();
+        RenderSystemDX11_EngineThread_BeforeRender(NadeCam::Pass::Stream);
 
         g_Engine2_RenderService_OnClientOutput(pUnk0,pUnk1);
         g_bHad_ClientOutput = true;
+    }
+
+    // All user streams consume the observer first. Sample the inset for the next visible frame
+    // and wait for scene submission before restoring the observer's camera and visibility.
+    if (hasInset) {
+        My_SceneSystem_WaitForRenderingToComplete(g_pSceneSystem);
+        NadeCam::RenderInset(camera, [&]() {
+            g_Old_FrameUpdate(g_pSceneSystem, 1);
+            RenderSystemDX11_EngineThread_BeforeRender(NadeCam::Pass::Inset, camera.shot);
+            g_Engine2_RenderService_OnClientOutput(pUnk0, pUnk1);
+            g_Old_SceneSystem_WaitForRenderingToComplete(g_pSceneSystem);
+            ClearThreadSceneLayerContexts();
+        });
     }
 }
 

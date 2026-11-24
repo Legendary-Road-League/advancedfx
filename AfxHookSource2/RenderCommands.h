@@ -61,12 +61,12 @@ public:
         ID3D11DeviceContext * Context = nullptr;
 
         // Carry the engine's camera choice with this specific queued DX11 pass.
-        NadeCam::View nadeView = NadeCam::View::Normal;
+        NadeCam::Pass nadePass = NadeCam::Pass::Stream;
         uint64_t nadeShot = 0;
         bool nadeComposed = false;
 
         void Finalize(){
-            nadeView = NadeCam::View::Normal;
+            nadePass = NadeCam::Pass::Stream;
             nadeShot = 0;
             nadeComposed = false;
             BeginReliable.Clear();

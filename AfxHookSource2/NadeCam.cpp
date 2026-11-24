@@ -4,7 +4,6 @@
 #include "MirvTime.h"
 #include "SchemaSystem.h"
 #include "WrpConsole.h"
-#include <atomic>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -21,7 +20,6 @@ namespace {
     Frame frame;
     int lastFrame = -1;
     uint64_t shot = 0;
-    std::atomic<uint64_t> observerImage{0};
     using Handle = SOURCESDK::CS2::CBaseHandle;
     Handle target, observedThrower;
     float firstTime, lastMotion, lastTime, yaw;
@@ -238,9 +236,6 @@ void OnRemove(unsigned int handle) {
     if (target.IsValid() && target.ToInt() == handle) BeginImpact(g_MirvTime.curtime_get());
 }
 
-// A PiP shot must have a usable observer background before any grenade frames are rendered.
-void SetObserverImageReady(uint64_t id) { observerImage.store(id); }
-
 // Sample flight once per frame, preserving orientation through a pause and vertical bounces.
 const Frame &CurrentFrame() {
     ReadMode();
@@ -279,11 +274,7 @@ const Frame &CurrentFrame() {
         ShowImpact(now);
     }
     frame.shot = shot;
-    if (mode == Mode::Full) frame.view = View::Full;
-    else {
-        const bool ready = observerImage.load() == shot;
-        frame.view = ready && frame.view == View::PipObserver ? View::PipGrenade : View::PipObserver;
-    }
+    frame.view = mode == Mode::Full ? View::Full : View::Pip;
     return frame;
 }
 

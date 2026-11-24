@@ -629,6 +629,12 @@ CON_COMMAND(mirv_camio, "New camera motion data import / export.") {
 static bool g_bViewOverriden = false;
 static float g_fFovOverride = 90.0f;
 static float * g_pFov = nullptr;
+// Engine-thread state valid only for the observer view acquired in the current game frame.
+static void *g_SettingUpViewRenderer = nullptr;
+static void *g_NadeCamViewRenderer = nullptr;
+static int g_NadeCamViewFrame = -1;
+static NadeCam::Frame g_NadeCamObserver;
+static const NadeCam::Frame *g_NadeCamPassCamera = nullptr;
 int g_iWidth = 1920;
 int g_iHeight = 1080;
 SOURCESDK::VMatrix g_WorldToScreenMatrix;
@@ -651,6 +657,14 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	float *pFov = (float*)((unsigned char *)ThisCViewSetup + 0x498);
 	float *pViewOrigin = (float*)((unsigned char *)ThisCViewSetup + 0x4a0);
 	float *pViewAngles = (float*)((unsigned char *)ThisCViewSetup + 0x4b8);
+	// Both private view rebuilds reuse a sampled pose, keeping input, scripts and exports once per frame.
+	if (g_NadeCamPassCamera) {
+		const auto &camera = *g_NadeCamPassCamera;
+		memcpy(pViewOrigin, camera.position, sizeof(camera.position));
+		memcpy(pViewAngles, camera.angles, sizeof(camera.angles));
+		*pFov = camera.fov;
+		return g_pEngineToClient->IsPlayingDemo();
+	}
 
 	int width = *pWidth;
 	int height = *pHeight;
@@ -815,15 +829,14 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	g_CurrentGameCamera.angles[2] = Rz;
 	g_CurrentGameCamera.time = curTime;
 
-	// The inset has its own lens. Keep the observer's camera and camera export for subsequent frames.
-	if (nadeFrame.view == NadeCam::View::PipGrenade) {
-		memcpy(pViewOrigin, nadeFrame.position, sizeof(nadeFrame.position));
-		memcpy(pViewAngles, nadeFrame.angles, sizeof(nadeFrame.angles));
-		*pFov = g_fFovOverride = nadeFrame.fov;
-		g_pFov = pFov;
-		g_bViewOverriden = true;
+	if (nadeFrame.view == NadeCam::View::Pip) {
+		g_NadeCamObserver.shot = nadeFrame.shot;
+		memcpy(g_NadeCamObserver.position, pViewOrigin, sizeof(g_NadeCamObserver.position));
+		memcpy(g_NadeCamObserver.angles, pViewAngles, sizeof(g_NadeCamObserver.angles));
+		g_NadeCamObserver.fov = *pFov;
+		g_NadeCamViewRenderer = g_SettingUpViewRenderer;
+		g_NadeCamViewFrame = g_MirvTime.framecount_get();
 	}
-
 	return g_pEngineToClient->IsPlayingDemo();
 }
 
@@ -932,9 +945,22 @@ CON_COMMAND(__mirv_o,"") {
 
 typedef void (__fastcall * CViewRender_UnkMakeMatrix_t)(void* This);
 CViewRender_UnkMakeMatrix_t g_Old_CViewRender_UnkMakeMatrix = nullptr;
+// OnClientOutput consumes an already prepared view. Rebuild it for each camera so the inset
+// gets its own visible geometry as well as its own origin, angles and lens.
+void NadeCam::RenderInset(const Frame &camera, const std::function<void()> &render) {
+	if (!g_NadeCamViewRenderer || g_NadeCamViewFrame != g_MirvTime.framecount_get()
+		|| g_NadeCamObserver.shot != camera.shot) return;
+	g_NadeCamPassCamera = &camera;
+	g_Old_CViewRender_UnkMakeMatrix(g_NadeCamViewRenderer);
+	render();
+	g_NadeCamPassCamera = &g_NadeCamObserver;
+	g_Old_CViewRender_UnkMakeMatrix(g_NadeCamViewRenderer);
+	g_NadeCamPassCamera = nullptr;
+}
 void __fastcall New_CViewRender_UnkMakeMatrix(void* This) {
-	
+	g_SettingUpViewRenderer = This;
 	g_Old_CViewRender_UnkMakeMatrix(This);
+	g_SettingUpViewRenderer = nullptr;
 	//memcpy(g_WorldToScreenMatrix.m,(unsigned char*)This + 0x1b8,sizeof(g_WorldToScreenMatrix.m));
 
 

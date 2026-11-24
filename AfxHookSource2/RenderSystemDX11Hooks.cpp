@@ -1861,7 +1861,7 @@ public:
         m_AllowInTarget = value;
     }
 
-    // A sampleable texture can serve either as the observer background or the scaled inset.
+    // Only textures with a shader resource view can be scaled into the inset.
     bool HasSample() const { return m_HasImage && m_pTextureSrv; }
 
     // Draw the cached flight camera in the upper right, using the same scaler as stream previews.
@@ -1970,24 +1970,20 @@ private:
     bool m_AllowInTarget = false;
 } g_StreamPreview;
 
-// PiP alternates camera samples and composites them on the GPU before Panorama draws the HUD.
-// Each shot owns its background and inset, including across seeks, mode changes and DX11 resets.
-static CStreamPreview g_NadeObserver, g_NadeInset;
+// Retain only the previous offscreen sample. Each visible frame supplies a fresh observer scene.
+static CStreamPreview g_NadeInset;
 static uint64_t g_NadeImageShot = 0;
 
 static void ReleaseNadeImages() {
-    NadeCam::SetObserverImageReady(0);
     g_NadeImageShot = 0;
-    g_NadeObserver.OnTargetEnd();
     g_NadeInset.OnTargetEnd();
 }
 
 // Compose once per pass. The HUD-stage callback is also usable when the before-UI shader is absent.
 static void ComposeNadeCam(CRenderCommands::CRenderPassCommands &pass, ID3D11DeviceContext *context,
                            ID3D11RenderTargetView *target) {
-    if (pass.nadeComposed) return;
-    const bool observer = pass.nadeView == NadeCam::View::PipObserver;
-    if (!observer && pass.nadeView != NadeCam::View::PipGrenade) {
+    if (pass.nadePass == NadeCam::Pass::Stream || pass.nadeComposed) return;
+    if (!pass.nadeShot) {
         if (g_NadeImageShot) ReleaseNadeImages();
         return;
     }
@@ -2010,22 +2006,19 @@ static void ComposeNadeCam(CRenderCommands::CRenderPassCommands &pass, ID3D11Dev
     GetViewportSize(context, width, height);
     if (!width || width > desc.Width) width = desc.Width;
     if (!height || height > desc.Height) height = desc.Height;
-    if (observer) {
-        g_NadeObserver.Update(g_pDevice, context, texture, width, height);
-        NadeCam::SetObserverImageReady(g_NadeObserver.HasSample() ? pass.nadeShot : 0);
-        pass.nadeComposed = true;
-    } else {
+    if (pass.nadePass == NadeCam::Pass::Inset) {
         g_NadeInset.Update(g_pDevice, context, texture, width, height);
-        pass.nadeComposed = g_NadeObserver.Draw(context, texture);
+    } else {
+        g_NadeInset.DrawInset(context, target, width, height);
     }
-    if (pass.nadeComposed) g_NadeInset.DrawInset(context, target, width, height);
+    pass.nadeComposed = true;
     texture->Release();
 }
 
-// A device reset or missing render target must never present an isolated grenade frame in PiP.
+// The inset pass writes only the cached texture, even when the game requests a real present.
 static bool NadeCamCanPresent() {
     auto pass = g_RenderCommands.RenderThread_GetCommands();
-    return !pass || pass->nadeView != NadeCam::View::PipGrenade || pass->nadeComposed;
+    return !pass || pass->nadePass != NadeCam::Pass::Inset;
 }
 
 extern void ErrorBox(char const * messageText);
@@ -3882,7 +3875,7 @@ public:
         }
     }    
 
-    void EngineThread_BeginMainRenderPass() {
+    void EngineThread_BeginMainRenderPass(bool hasInset) {
         bool bPreview = false;
         for(auto it = m_MainPass.begin(); it != m_MainPass.end(); it++) {
             bPreview = bPreview || it->GetPreview();
@@ -3891,7 +3884,8 @@ public:
 
         if(bPreview) EngineThread_SetupPreview(true);
      
-        EngineThread_SetupPresent(0 == m_Preview.size() && m_Recording || bPreview, 0 != m_Preview.size() && !bPreview);
+        // A following inset consumes the game's final present. Show the observer at its pass boundary.
+        EngineThread_SetupPresent((m_Preview.empty() && (m_Recording || hasInset)) || bPreview, !m_Preview.empty() && !bPreview);
     }
 
     void EngineThread_EndMainRenderPass() {
@@ -6087,11 +6081,10 @@ void RenderSystemDX11_EngineThread_Prepare() {
     }
 }
 
-void RenderSystemDX11_EngineThread_BeforeRender() {
-    const auto &camera = NadeCam::CurrentFrame();
+void RenderSystemDX11_EngineThread_BeforeRender(NadeCam::Pass stage, uint64_t shot) {
     auto &pass = g_RenderCommands.EngineThread_GetCommands();
-    pass.nadeView = camera.view;
-    pass.nadeShot = camera.shot;
+    pass.nadePass = stage;
+    pass.nadeShot = shot;
     g_RenderCommands.EngineThread_EndFrame();
     g_CampathDrawer.OnEngineThread_EndFrame();
 }
@@ -6108,8 +6101,8 @@ void RenderSystemDX11_EngineThread_EndNextRenderPass() {
     g_AfxStreams.EngineThread_EndNextRenderPass();
 }
 
-void RenderSystemDX11_EngineThread_BeginMainRenderPass() {
-    g_AfxStreams.EngineThread_BeginMainRenderPass();
+void RenderSystemDX11_EngineThread_BeginMainRenderPass(bool hasInset) {
+    g_AfxStreams.EngineThread_BeginMainRenderPass(hasInset);
 }
 
 void RenderSystemDX11_EngineThread_EndMainRenderPass() {
