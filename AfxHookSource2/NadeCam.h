@@ -11,6 +11,7 @@ namespace NadeCam {
         View view = View::Normal;
         uint64_t shot = 0;
         float position[3]{}, angles[3]{};
+        float fov = 90;
     };
 
     // Register the client mode variable after the game's console interface is available.

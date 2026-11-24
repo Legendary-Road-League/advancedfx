@@ -86,6 +86,9 @@ void initSchemaSystemOffsets()
 	bool bOk = true;
 	// A missing detonation marker falls back to entity removal or rest detection.
 	getOffset(&g_clientDllOffsets.C_BaseCSGrenadeProjectile.m_nExplodeEffectTickBegin, "client.dll", "C_BaseCSGrenadeProjectile", "m_nExplodeEffectTickBegin");
+	// These optional fields allow NadeCam to verify ownership and recognize smoke starting to bloom.
+	getOffset(&g_clientDllOffsets.C_BaseGrenade.m_hThrower, "client.dll", "C_BaseGrenade", "m_hThrower");
+	getOffset(&g_clientDllOffsets.C_SmokeGrenadeProjectile.m_bDidSmokeEffect, "client.dll", "C_SmokeGrenadeProjectile", "m_bDidSmokeEffect");
 
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_CSGameRulesProxy.m_pGameRules, "client.dll", "C_CSGameRulesProxy", "m_pGameRules");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_CSGameRules.m_gamePhase, "client.dll", "C_CSGameRules", "m_gamePhase");

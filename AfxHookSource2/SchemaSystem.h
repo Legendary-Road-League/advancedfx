@@ -55,7 +55,13 @@ struct ClientDllOffsets_t {
 
 	} C_BaseCSGrenadeProjectile;
 
+	// Replicated thrower identifies the player's pawn, including after a projectile bounces.
+	struct C_BaseGrenade {
+		ptrdiff_t m_hThrower = 0;
+	} C_BaseGrenade;
+
 	struct C_SmokeGrenadeProjectile {
+		ptrdiff_t m_bDidSmokeEffect = 0;
 		ptrdiff_t m_vSmokeColor = 0; // Vector
 	} C_SmokeGrenadeProjectile;
 
