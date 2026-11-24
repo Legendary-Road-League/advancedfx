@@ -4,12 +4,16 @@
 #include "MirvTime.h"
 #include "SchemaSystem.h"
 #include "WrpConsole.h"
+#include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <deque>
 #include <optional>
+#include <string>
 #include <vector>
+
+extern SOURCESDK::CS2::ISource2EngineToClient *g_pEngineToClient;
 
 namespace NadeCam {
 namespace {
@@ -18,7 +22,7 @@ namespace {
     SOURCESDK::CS2::Cvar_s *modeVar = nullptr;
     SOURCESDK::CS2::Cvar_s *impactFovVar = nullptr;
     Frame frame;
-    int lastFrame = -1;
+    int lastFrame = -1, lastDemoTick = -1;
     uint64_t shot = 0;
     using Handle = SOURCESDK::CS2::CBaseHandle;
     Handle target, observedThrower;
@@ -37,15 +41,37 @@ namespace {
     struct Impact { Sample center, from, wide; float start, startFov; };
     std::optional<Impact> impact;
 
+    // CS2 clears the target in roaming mode. Keep both serialised handles until the return is complete.
+    struct Observer { Handle spectator, player; int mode = 0; };
+    enum class Transition { Entering, Roaming, AwaitingSpectator, Returning };
+    struct FullFollow { Observer original; Handle controller; Transition state; ULONGLONG requested, retryAfter = 0; };
+    std::optional<FullFollow> fullFollow;
+
+    // Discard only projectile data while an already requested spectator transition settles.
+    void ClearShot() {
+        target.Term();
+        observedThrower.Term();
+        impact.reset();
+        pending.clear();
+        trail.clear();
+        lastFrame = -1;
+        lastDemoTick = -1;
+        // Keep the last fullscreen image's camera until CS2 actually leaves roaming.
+        if (!fullFollow || fullFollow->state != Transition::Returning) frame = {};
+    }
+
+    void ReturnToPlayer();
+
     // Keep command aliases, native key bindings and an in-flight camera on the same mode.
     void ApplyMode(Mode selected) {
         if (selected == mode) return;
+        if (mode == Mode::Full) ReturnToPlayer();
         mode = selected;
-        if (mode == Mode::Off) Reset();
+        if (mode == Mode::Off) ClearShot();
         else {
             ++shot;
             lastFrame = -1;
-            frame.view = View::Normal;
+            if (!fullFollow || fullFollow->state != Transition::Returning) frame.view = View::Normal;
         }
     }
 
@@ -62,16 +88,105 @@ namespace {
     }
 
     // In-eye and chase modes have a selected player. Roaming and fixed cameras have no thrower.
-    Handle ObservedPawn() {
+    Observer ReadObserver() {
         auto controller = GetLocalPlayerController();
         if (!controller || !controller->IsPlayerController()) return {};
         auto pawn = Resolve(controller->GetPlayerPawnHandle());
         if (!pawn) return {};
-        const int observerMode = pawn->GetObserverMode();
-        if (observerMode != 2 && observerMode != 3) return {};
-        const auto handle = pawn->GetObserverTarget();
-        auto player = Resolve(handle);
-        return player && player->IsPlayerPawn() ? handle : Handle{};
+        Observer view{pawn->GetHandle(), {}, pawn->GetObserverMode()};
+        if (view.mode == 2 || view.mode == 3) {
+            auto player = Resolve(pawn->GetObserverTarget());
+            if (player && player->IsPlayerPawn()) view.player = player->GetHandle();
+        }
+        return view;
+    }
+
+    // Start only after a throw is selected. Native spectator commands take effect on a later frame.
+    void EnterFreeLook(const Observer &view) {
+        if (fullFollow || !g_pEngineToClient || view.player != observedThrower) return;
+        auto player = Resolve(view.player);
+        if (!player) return;
+        const auto controller = player->GetPlayerControllerHandle();
+        if (!Resolve(controller)) return;
+        fullFollow = FullFollow{view, controller, Transition::Entering, GetTickCount64()};
+        g_pEngineToClient->ExecuteClientCmd(0, "spec_mode 4", true);
+    }
+
+    // Restore the native mode first, then select the original controller by its numeric slot.
+    // If the player left, CS2 can choose another target in that mode. A manual camera takes priority.
+    void ReturnToPlayer() {
+        if (!fullFollow) return;
+        auto &follow = *fullFollow;
+        const auto view = ReadObserver();
+        // A demo seek temporarily removes the local spectator while rebuilding its entity list.
+        // Wait for the same spectator to reappear before issuing commands against its new snapshot.
+        if (!view.spectator.IsValid()) {
+            if (follow.state != Transition::AwaitingSpectator) {
+                follow.state = Transition::AwaitingSpectator;
+                follow.requested = GetTickCount64();
+            }
+            return;
+        }
+        const auto now = GetTickCount64();
+        if (follow.state == Transition::Returning && now < follow.retryAfter) return;
+        const bool stillEntering = follow.state == Transition::Entering &&
+            view.mode == follow.original.mode && view.player == follow.original.player;
+        if (!g_pEngineToClient || view.spectator != follow.original.spectator || (view.mode != 4 && !stillEntering)) {
+            fullFollow.reset();
+            return;
+        }
+        std::string command = "spec_mode " + std::to_string(follow.original.mode);
+        auto controller = Resolve(follow.controller);
+        auto player = controller ? Resolve(controller->GetPlayerPawnHandle()) : nullptr;
+        if (player && player->IsPlayerPawn() && player->GetPlayerControllerHandle() == follow.controller && player->GetHealth() > 0)
+            command += ";spec_player " + std::to_string(follow.controller.GetEntryIndex());
+        if (follow.state != Transition::Returning) follow.requested = now;
+        follow.state = Transition::Returning;
+        follow.retryAfter = now + 250;
+        g_pEngineToClient->ExecuteClientCmd(0, command.c_str(), true);
+    }
+
+    // End the shot and release a free camera acquired for this throw.
+    void FinishShot() {
+        ReturnToPlayer();
+        ClearShot();
+    }
+
+    // Only our own roaming transition inherits the thrower. Relinquish the camera on manual changes
+    // or an unacknowledged command, including while a demo is paused.
+    Handle TrackingPlayer(const Observer &view) {
+        if (!fullFollow) return view.player;
+        if (!view.spectator.IsValid()) {
+            if (fullFollow->state == Transition::AwaitingSpectator && GetTickCount64() - fullFollow->requested >= 2000)
+                Reset();
+            else FinishShot();
+            return {};
+        }
+        if (fullFollow->state == Transition::AwaitingSpectator) {
+            ReturnToPlayer();
+            return view.player;
+        }
+        auto &follow = *fullFollow;
+        if (view.spectator == follow.original.spectator) {
+            const bool pendingCommand = GetTickCount64() - follow.requested < 2000;
+            if (view.mode == 4 && (follow.state != Transition::Returning || pendingCommand)) {
+                const Handle player = follow.original.player;
+                if (follow.state == Transition::Entering) follow.state = Transition::Roaming;
+                // CS2 can discard a command during a seek. Retry briefly while we still own roaming.
+                if (follow.state == Transition::Returning) ReturnToPlayer();
+                return Resolve(player) ? player : Handle{};
+            }
+            if (view.mode == follow.original.mode && view.player == follow.original.player) {
+                if (follow.state == Transition::Entering && pendingCommand) return view.player;
+                if (follow.state == Transition::Returning) {
+                    fullFollow.reset();
+                    frame.view = View::Normal;
+                    return view.player;
+                }
+            }
+        }
+        Reset();
+        return view.player;
     }
 
     // Prefer the grenade's own thrower. Older schemas may expose only the base entity's owner.
@@ -210,23 +325,18 @@ void InitConsole() {
     if (!modeVar) advancedfx::Warning("Could not register mirv_nadecam_mode. Use mirv_nadecam off | pip | full.\n");
 }
 
-// Release the shot immediately on removal, map change, rewind, or manual cancellation.
+// A new level or a manual observer selection invalidates the old spectator session.
 void Reset() {
-    target.Term();
-    observedThrower.Term();
-    impact.reset();
-    pending.clear();
-    trail.clear();
-    lastFrame = -1;
-    frame = {};
+    fullFollow.reset();
+    ClearShot();
 }
 
 // Capture the selected player now, before network updates supply the projectile's owner and origin.
 void OnAdd(CEntityInstance *entity, unsigned int handle) {
     ReadMode();
     if (mode == Mode::Off || !entity || !IsGrenade(entity)) return;
-    const auto observer = ObservedPawn();
-    if (observedThrower.IsValid() && observer != observedThrower) Reset();
+    const auto observer = TrackingPlayer(ReadObserver());
+    if (observedThrower.IsValid() && observer != observedThrower) FinishShot();
     if (observer.IsValid() && !target.IsValid())
         pending.push_back({Handle(handle), observer, g_MirvTime.curtime_get(), {}});
 }
@@ -239,25 +349,35 @@ void OnRemove(unsigned int handle) {
 // Sample flight once per frame, preserving orientation through a pause and vertical bounces.
 const Frame &CurrentFrame() {
     ReadMode();
-    if (!observedThrower.IsValid() && pending.empty()) return frame;
+    if (!observedThrower.IsValid() && pending.empty() && !fullFollow) return frame;
     const int count = g_MirvTime.framecount_get();
     if (count == lastFrame) return frame;
     lastFrame = count;
-    const float now = g_MirvTime.curtime_get();
-    const auto observer = ObservedPawn();
+    float now = g_MirvTime.curtime_get();
+    int tick = -1;
+    const bool inDemo = g_MirvTime.GetCurrentDemoTick(tick) && tick >= 0;
+    // Pausing or changing recording FPS can move interpolated client time back within a tick.
+    // Use the replay tick to identify rewinds and keep flight samples ordered during ordinary playback.
+    const bool rewound = inDemo ? lastDemoTick >= 0 && tick < lastDemoTick : now < lastTime;
+    lastDemoTick = tick;
+    const auto view = ReadObserver();
+    const auto observer = TrackingPlayer(view);
+    if (fullFollow && fullFollow->state == Transition::Returning && view.mode == 4) return frame;
     if (!observer.IsValid() || (observedThrower.IsValid() && (observer != observedThrower ||
-        now < lastTime || now - lastTime > 1.0f || now - firstTime > 14.0f))) {
-        Reset();
+        rewound || now - lastTime > 1.0f || now - firstTime > 14.0f))) {
+        FinishShot();
         return frame;
     }
+    if (observedThrower.IsValid()) now = (std::max)(lastTime, now);
     if (!pending.empty()) SelectThrow(observer, now);
     if (!observedThrower.IsValid()) return frame;
+    if (mode == Mode::Full) EnterFreeLook(view);
     lastTime = now;
     if (!impact) {
         auto entity = Resolve(target);
-        if (!entity) { Reset(); return frame; }
+        if (!entity) { FinishShot(); return frame; }
         const auto point = Position(entity, now);
-        if (!point) { Reset(); return frame; }
+        if (!point) { FinishShot(); return frame; }
         const auto &prev = trail.back();
         if (prev.x != point->x || prev.y != point->y || prev.z != point->z) lastMotion = now;
         if (prev.time == now) trail.pop_back();
@@ -270,11 +390,13 @@ const Frame &CurrentFrame() {
         }
     }
     if (impact) {
-        if (now - impact->start >= 2.2f) { Reset(); return frame; }
+        if (now - impact->start >= 2.2f) { FinishShot(); return frame; }
         ShowImpact(now);
     }
     frame.shot = shot;
-    frame.view = mode == Mode::Full ? View::Full : View::Pip;
+    // Wait for the native roaming camera so the first fullscreen frame already has a free view.
+    if (mode == Mode::Pip) frame.view = View::Pip;
+    else frame.view = fullFollow && fullFollow->state == Transition::Roaming ? View::Full : View::Normal;
     return frame;
 }
 
