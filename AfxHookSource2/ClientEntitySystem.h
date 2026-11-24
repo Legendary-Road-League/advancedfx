@@ -13,6 +13,9 @@ void Hook_ClientEntitySystem3(HMODULE clientDll);
 
 bool Hook_GetSplitScreenPlayer( void* pAddr);
 
+// Local controller used to distinguish live spectators from active players.
+class CEntityInstance *GetLocalPlayerController();
+
 class CAfxEntityInstanceRef;
 
 class CEntityInstance {

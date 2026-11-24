@@ -84,6 +84,8 @@ bool getOffset(ptrdiff_t* offset, std::string moduleName, std::string className,
 void initSchemaSystemOffsets()
 {
 	bool bOk = true;
+	// A missing detonation marker falls back to entity removal or rest detection.
+	getOffset(&g_clientDllOffsets.C_BaseCSGrenadeProjectile.m_nExplodeEffectTickBegin, "client.dll", "C_BaseCSGrenadeProjectile", "m_nExplodeEffectTickBegin");
 
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_CSGameRulesProxy.m_pGameRules, "client.dll", "C_CSGameRulesProxy", "m_pGameRules");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_CSGameRules.m_gamePhase, "client.dll", "C_CSGameRules", "m_gamePhase");

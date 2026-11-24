@@ -257,6 +257,11 @@ elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
         COMPONENT x64-source2
     )
 
+    # Ship the optional CS2 spectator bindings in HLAE's mounted game search path.
+    install(FILES "resources/resources/AfxHookSource2/cs2/cfg/lrl_nadecam.cfg"
+        DESTINATION "bin/resources/AfxHookSource2/cs2/cfg"
+        COMPONENT x64-source2)
+
 #    corrosion_install(
 #        TARGETS
 #            ${AFX_RUST_TOOL_CRATES}

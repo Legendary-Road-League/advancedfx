@@ -22,6 +22,7 @@
 #include "MirvColors.h"
 #include "MirvFix.h"
 #include "MirvTime.h"
+#include "NadeCam.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/AfxHookSource/SourceInterfaces.h"
@@ -747,6 +748,13 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 		}		
 	}
 
+	// Fullscreen follows the projectile in the normal camera/recording pipeline.
+	const auto &nadeFrame = NadeCam::CurrentFrame();
+	if (nadeFrame.view == NadeCam::View::Full) {
+		Tx = nadeFrame.position[0]; Ty = nadeFrame.position[1]; Tz = nadeFrame.position[2];
+		Rx = nadeFrame.angles[0]; Ry = nadeFrame.angles[1]; Rz = 0; Fov = 90;
+		originOrAnglesOverriden = true;
+	}
 	if (g_S2CamIO.GetCamExport())
 	{
 		CamIO::CamData camData;
@@ -806,6 +814,15 @@ bool CS2_Client_CSetupView_Trampoline_IsPlayingDemo(void *ThisCViewSetup) {
 	g_CurrentGameCamera.angles[1] = Ry;
 	g_CurrentGameCamera.angles[2] = Rz;
 	g_CurrentGameCamera.time = curTime;
+
+	// The inset has its own lens. Keep the observer's camera and camera export for subsequent frames.
+	if (nadeFrame.view == NadeCam::View::PipGrenade) {
+		memcpy(pViewOrigin, nadeFrame.position, sizeof(nadeFrame.position));
+		memcpy(pViewAngles, nadeFrame.angles, sizeof(nadeFrame.angles));
+		*pFov = g_fFovOverride = 90;
+		g_pFov = pFov;
+		g_bViewOverriden = true;
+	}
 
 	return g_pEngineToClient->IsPlayingDemo();
 }
@@ -1345,6 +1362,7 @@ int new_CCS2_Client_Init(void* This) {
 	g_ReShadeAdvancedfx.Connect();
 
 	WrpRegisterCommands();
+	NadeCam::InitConsole();
 
 	AfxHookSource2Rs_Engine_Init();
 
@@ -1449,6 +1467,7 @@ extern void ScenePicker_Stop();
 typedef void * (* CS2_Client_LevelInitPreEntity_t)(void* This, void * pUnk1, void * pUnk2);
 CS2_Client_LevelInitPreEntity_t old_CS2_Client_LevelInitPreEntity;
 void * new_CS2_Client_LevelInitPreEntity(void* This, void * pUnk1, void * pUnk2) {
+	NadeCam::Reset();
 	resetDefaultCloudColors();
 	resetCachedMaterials();
 	ScenePicker_Stop(); // Entity handles are meaningless on a new level.

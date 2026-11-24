@@ -195,7 +195,7 @@ public:
     bool Scale(ID3D11DeviceContext * pContext,
         ID3D11ShaderResourceView * pSrcSrv, UINT srcTexWidth, UINT srcTexHeight, UINT srcWidth, UINT srcHeight,
         ID3D11RenderTargetView * pDstRtv, UINT dstWidth, UINT dstHeight,
-        bool bLinear
+        bool bLinear, FLOAT dstX = 0, FLOAT dstY = 0
     ) {
         ID3D11SamplerState * pSampler = bLinear ? m_LinearSampler : m_PointSampler;
 
@@ -221,7 +221,7 @@ public:
 
         m_DeviceContext->OMSetRenderTargets(1, &pDstRtv, nullptr);
 
-        D3D11_VIEWPORT viewPort = {0.0f, 0.0f, (FLOAT)dstWidth, (FLOAT)dstHeight, 0.0f, 1.0f};
+        D3D11_VIEWPORT viewPort = {dstX, dstY, (FLOAT)dstWidth, (FLOAT)dstHeight, 0.0f, 1.0f};
         m_DeviceContext->RSSetViewports(1, &viewPort);
         m_DeviceContext->RSSetState(m_RasterizerState);
 
@@ -1861,6 +1861,22 @@ public:
         m_AllowInTarget = value;
     }
 
+    // A sampleable texture can serve either as the observer background or the scaled inset.
+    bool HasSample() const { return m_HasImage && m_pTextureSrv; }
+
+    // Draw the cached flight camera in the upper right, using the same scaler as stream previews.
+    bool DrawInset(ID3D11DeviceContext *context, ID3D11RenderTargetView *target, UINT width, UINT height) {
+        if (!HasSample()) return false;
+        const UINT w = width / 3, h = height / 3, margin = height / 40;
+        if (!w || !h) return false;
+        bool old = g_bInOwnDraw;
+        g_bInOwnDraw = true;
+        bool drawn = g_CaptureScaler.Scale(context, m_pTextureSrv, m_TextureDesc.Width, m_TextureDesc.Height,
+            m_Width, m_Height, target, w, h, true, (FLOAT)(width - w - margin), (FLOAT)margin);
+        g_bInOwnDraw = old;
+        return drawn;
+    }
+
     void OnBeforePanoramaEngineConsole(ID3D11DeviceContext * pContext) {
         if(!m_HasImage || m_Applied || !m_AllowInTarget || nullptr == g_BeforeUiRT) return;
 
@@ -1953,6 +1969,64 @@ private:
     bool m_Applied = false;
     bool m_AllowInTarget = false;
 } g_StreamPreview;
+
+// PiP alternates camera samples and composites them on the GPU before Panorama draws the HUD.
+// Each shot owns its background and inset, including across seeks, mode changes and DX11 resets.
+static CStreamPreview g_NadeObserver, g_NadeInset;
+static uint64_t g_NadeImageShot = 0;
+
+static void ReleaseNadeImages() {
+    NadeCam::SetObserverImageReady(0);
+    g_NadeImageShot = 0;
+    g_NadeObserver.OnTargetEnd();
+    g_NadeInset.OnTargetEnd();
+}
+
+// Compose once per pass. The HUD-stage callback is also usable when the before-UI shader is absent.
+static void ComposeNadeCam(CRenderCommands::CRenderPassCommands &pass, ID3D11DeviceContext *context,
+                           ID3D11RenderTargetView *target) {
+    if (pass.nadeComposed) return;
+    const bool observer = pass.nadeView == NadeCam::View::PipObserver;
+    if (!observer && pass.nadeView != NadeCam::View::PipGrenade) {
+        if (g_NadeImageShot) ReleaseNadeImages();
+        return;
+    }
+    if (pass.nadeShot != g_NadeImageShot) {
+        ReleaseNadeImages();
+        g_NadeImageShot = pass.nadeShot;
+    }
+    if (!g_pDevice || !target || !context) return;
+    ID3D11Resource *resource = nullptr;
+    target->GetResource(&resource);
+    ID3D11Texture2D *texture = nullptr;
+    if (resource) {
+        resource->QueryInterface(IID_PPV_ARGS(&texture));
+        resource->Release();
+    }
+    if (!texture) return;
+    D3D11_TEXTURE2D_DESC desc;
+    texture->GetDesc(&desc);
+    UINT width = 0, height = 0;
+    GetViewportSize(context, width, height);
+    if (!width || width > desc.Width) width = desc.Width;
+    if (!height || height > desc.Height) height = desc.Height;
+    if (observer) {
+        g_NadeObserver.Update(g_pDevice, context, texture, width, height);
+        NadeCam::SetObserverImageReady(g_NadeObserver.HasSample() ? pass.nadeShot : 0);
+        pass.nadeComposed = true;
+    } else {
+        g_NadeInset.Update(g_pDevice, context, texture, width, height);
+        pass.nadeComposed = g_NadeObserver.Draw(context, texture);
+    }
+    if (pass.nadeComposed) g_NadeInset.DrawInset(context, target, width, height);
+    texture->Release();
+}
+
+// A device reset or missing render target must never present an isolated grenade frame in PiP.
+static bool NadeCamCanPresent() {
+    auto pass = g_RenderCommands.RenderThread_GetCommands();
+    return !pass || pass->nadeView != NadeCam::View::PipGrenade || pass->nadeComposed;
+}
 
 extern void ErrorBox(char const * messageText);
 
@@ -2120,6 +2194,7 @@ HRESULT STDMETHODCALLTYPE New_CreateRenderTargetView(  ID3D11Device * This,
                 if(g_pDevice) {
                     g_NoDraw.OnTargetEnd();
                     g_StreamPreview.OnTargetEnd();
+                    ReleaseNadeImages();
                     g_DepthCompositor.OnTargetEnd();
                     g_CaptureScaler.OnTargetEnd();
                     //CAfxShaderResourceViews::Clear();
@@ -2360,7 +2435,7 @@ public:
         if(g_RenderCommands.RenderThread_FrameBegun()) {
             Before_Present();
 
-            if(g_bExpectPresent && g_pSwapChain) {
+            if(g_bExpectPresent && g_pSwapChain && NadeCamCanPresent()) {
                 BlitToSwapChain();
                 DrawStreamPreviewToSwapChain();
                 g_Present_LastResult = g_OldPresent(g_pSwapChain, g_Present_LastSyncInterval, g_Present_LastPresentFlags);
@@ -2474,6 +2549,7 @@ void OnBeforeUi(ID3D11DeviceContext * pDeviceContext) {
             ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
             pDeviceContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
             if (pRenderTargetViews[0]) {
+                ComposeNadeCam(*pRenderPassCommands, pDeviceContext, pRenderTargetViews[0]);
                 if(!pRenderPassCommands->BeforeUiTexture.Empty())
                 {
                     ID3D11Resource* pRenderTargetViewResource = nullptr;
@@ -2512,6 +2588,7 @@ public:
                     if (pRenderTargetViews[0]) {
                         if(g_BeforeUiRT) g_BeforeUiRT->Release();
                         g_BeforeUiRT = pRenderTargetViews[0];
+                        ComposeNadeCam(*pRenderPassCommands, pDeviceContext, g_BeforeUiRT);
                     }
             }
         }
@@ -2962,6 +3039,7 @@ HRESULT STDMETHODCALLTYPE New_Present( void * This,
 
         Before_Present();
 
+        if (!NadeCamCanPresent()) g_Present_Suppress = true;
         if(!g_Present_Suppress) DrawStreamPreviewToSwapChain();
 
         HRESULT result =g_Present_Suppress ? g_Present_LastResult : (g_Present_LastResult = g_OldPresent(This, SyncInterval, Flags));
@@ -6010,6 +6088,10 @@ void RenderSystemDX11_EngineThread_Prepare() {
 }
 
 void RenderSystemDX11_EngineThread_BeforeRender() {
+    const auto &camera = NadeCam::CurrentFrame();
+    auto &pass = g_RenderCommands.EngineThread_GetCommands();
+    pass.nadeView = camera.view;
+    pass.nadeShot = camera.shot;
     g_RenderCommands.EngineThread_EndFrame();
     g_CampathDrawer.OnEngineThread_EndFrame();
 }

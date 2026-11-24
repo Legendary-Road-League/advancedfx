@@ -55,6 +55,10 @@ public:
 
 void WrpRegisterCommands();
 
+// Register a local integer ConVar for CS2's native bindtoggle, toggle and incrementvar commands.
+SOURCESDK::CS2::Cvar_s *WrpRegisterIntConVar(const char *name, const char *help,
+    int defaultValue, int minimum, int maximum);
+
 #define CON_COMMAND( name, description ) \
    static void name(advancedfx::ICommandArgs * args); \
    static CWrpConCommandCallback name##_callback( name ); \

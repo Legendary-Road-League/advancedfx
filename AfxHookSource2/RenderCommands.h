@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include "NadeCam.h"
 
 #include <functional>
 #include <atomic>
@@ -59,7 +60,15 @@ public:
 
         ID3D11DeviceContext * Context = nullptr;
 
+        // Carry the engine's camera choice with this specific queued DX11 pass.
+        NadeCam::View nadeView = NadeCam::View::Normal;
+        uint64_t nadeShot = 0;
+        bool nadeComposed = false;
+
         void Finalize(){
+            nadeView = NadeCam::View::Normal;
+            nadeShot = 0;
+            nadeComposed = false;
             BeginReliable.Clear();
             AfterPostProcessing.Clear();
             BeforeUiTexture.Clear();

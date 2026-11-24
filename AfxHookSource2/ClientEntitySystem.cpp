@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "ClientEntitySystem.h"
+#include "NadeCam.h"
 #include "DeathMsg.h"
 #include "WrpConsole.h"
 #include "Globals.h"
@@ -353,6 +354,7 @@ OnAddEntity_t g_Org_OnAddEntity = nullptr;
 void* __fastcall New_OnAddEntity(void* This, CEntityInstance* pInstance, SOURCESDK::uint32 handle) {
 
     void * result =  g_Org_OnAddEntity(This,pInstance,handle);
+    NadeCam::OnAdd(pInstance, handle);
 
     if(g_b_on_add_entity && pInstance) {
         auto pRef = CAfxEntityInstanceRef::Aquire(pInstance);
@@ -367,6 +369,7 @@ typedef void* (__fastcall * OnRemoveEntity_t)(void* This, CEntityInstance* inst,
 OnRemoveEntity_t g_Org_OnRemoveEntity = nullptr;
 
 void* __fastcall New_OnRemoveEntity(void* This, CEntityInstance* pInstance, SOURCESDK::uint32 handle) {
+    NadeCam::OnRemove(handle);
 
     if(g_b_on_remove_entity && pInstance) {
         auto pRef = CAfxEntityInstanceRef::Aquire(pInstance);
@@ -724,6 +727,11 @@ extern "C" const char* afx_hook_source2_get_entity_ref_sanitized_player_name(voi
 
 typedef CEntityInstance *  (__fastcall * ClientDll_GetSplitScreenPlayer_t)(int slot);
 ClientDll_GetSplitScreenPlayer_t g_ClientDll_GetSplitScreenPlayer = nullptr;
+
+// Query slot zero through the existing HLAE local-controller accessor.
+CEntityInstance *GetLocalPlayerController() {
+    return g_ClientDll_GetSplitScreenPlayer ? g_ClientDll_GetSplitScreenPlayer(0) : nullptr;
+}
 
 bool Hook_GetSplitScreenPlayer( void* pAddr) {
     g_ClientDll_GetSplitScreenPlayer = (ClientDll_GetSplitScreenPlayer_t)pAddr;

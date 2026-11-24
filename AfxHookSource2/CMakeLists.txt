@@ -285,6 +285,8 @@ target_sources(${PROJECT_NAME} PRIVATE
 	MirvFix.h
 
 	MirvTime.cpp
+    NadeCam.cpp
+    NadeCam.h
 	MirvTime.h
 
     ReplaceName.cpp

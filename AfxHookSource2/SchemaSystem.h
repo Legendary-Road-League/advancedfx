@@ -48,6 +48,7 @@ struct ClientDllOffsets_t {
 	} CModelState;
 
 	struct C_BaseCSGrenadeProjectile {
+		ptrdiff_t m_nExplodeEffectTickBegin = 0; // Optional detonation marker for NadeCam.
 		ptrdiff_t m_bCanCreateGrenadeTrail = 0; // bool
 		ptrdiff_t m_nSnapshotTrajectoryEffectIndex = 0; // ParticleIndex_t
 		ptrdiff_t m_flTrajectoryTrailEffectCreationTime = 0; // float32
